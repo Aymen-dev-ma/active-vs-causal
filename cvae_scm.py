@@ -20,7 +20,8 @@ class CVAE(nn.Module):
         self.fc4 = nn.Linear(256, input_dim)
 
     def encode(self, x, c):
-        h1 = F.relu(self.fc1(torch.cat([x, c], dim=1)))
+        concatenated = torch.cat([x, c], dim=1)
+        h1 = F.relu(self.fc1(concatenated))
         return self.fc21(h1), self.fc22(h1)
 
     def reparameterize(self, mu, logvar):
@@ -29,7 +30,8 @@ class CVAE(nn.Module):
         return mu + eps * std
 
     def decode(self, z, c):
-        h3 = F.relu(self.fc3(torch.cat([z, c], dim=1)))
+        concatenated = torch.cat([z, c], dim=1)
+        h3 = F.relu(self.fc3(concatenated))
         return self.fc4(h3)
 
     def forward(self, x, c):

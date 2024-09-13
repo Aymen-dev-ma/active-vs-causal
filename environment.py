@@ -26,6 +26,7 @@ class GameEnvironment:
         # Initialize current_s with the correct dimensions
         self.current_s = torch.zeros((self.games_no, self.s_dim), dtype=torch.float32)
         self.last_r = torch.zeros(self.games_no, dtype=torch.float32)
+        self.done = [False] * self.games_no  # Initialize the done attribute
         self.new_image_all()
 
         # Precompute s_bases for indexing
@@ -35,30 +36,33 @@ class GameEnvironment:
 
     def reset(self):
         self.randomize_environment_all()
-        state = self.current_frame_all()
-        state = state.view(-1).numpy()
+        state = self.current_s[0].numpy()
         return state
 
     def step(self, action, index=0):
-        # Aktualisiere den Zustand basierend auf der Aktion
-        if action == 0:  # Beispielaktion: nach oben
+        # Update the state based on the action
+        if action == 0:  # Up
             self.current_s[index, 0] += 1
-        elif action == 1:  # Beispielaktion: nach unten
+        elif action == 1:  # Down
             self.current_s[index, 0] -= 1
-        elif action == 2:  # Beispielaktion: nach links
+        elif action == 2:  # Left
             self.current_s[index, 1] -= 1
-        elif action == 3:  # Beispielaktion: nach rechts
+        elif action == 3:  # Right
             self.current_s[index, 1] += 1
 
-        # Berechne die Belohnung basierend auf dem neuen Zustand
+        # Ensure state values are within valid ranges
+        self.current_s[index, :self.s_dim - 1] = torch.clamp(self.current_s[index, :self.s_dim - 1], min=0)
+
+        # Calculate the reward based on the new state
         reward = -torch.sum(torch.abs(self.current_s[index])).item()
 
-        # Überprüfe, ob das Spiel beendet ist
+        # Check if the game is done (for example, if all state variables are zero)
         done = torch.all(self.current_s[index] == 0).item()
 
-        # Aktualisiere den Abschlussstatus
+        # Update the done status
         self.done[index] = done
 
+        # Return the new state, reward, and done flag
         return self.current_s[index].numpy(), reward, done
 
     def sample_s(self):  # Reward is zero after this!
