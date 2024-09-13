@@ -59,7 +59,7 @@ def main():
                 agent.update_model(batch)
     
             # Debug print to track progress
-            print(f'Episode {episode + 1}, Step {step_count}, Action: {action}, Reward: {reward}, Done: {done}')
+            print(f'Episode {episode + 1}, Step {step_count}, State: {state}, Action: {action}, Reward: {reward}, Done: {done}')
     
         print(f'Episode {episode + 1}/{args.episodes}, Total Reward: {total_reward}')
     
