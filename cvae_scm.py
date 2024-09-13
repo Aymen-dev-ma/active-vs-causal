@@ -12,6 +12,7 @@ class CVAE(nn.Module):
         super(CVAE, self).__init__()
         # Encoder
         self.fc1 = nn.Linear(input_dim + condition_dim, 256)
+        print(f"Initialized CVAE fc1 with input_dim={input_dim + condition_dim}, output_dim=256")
         self.fc21 = nn.Linear(256, latent_dim)  # Mean
         self.fc22 = nn.Linear(256, latent_dim)  # Log variance
 

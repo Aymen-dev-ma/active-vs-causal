@@ -73,11 +73,11 @@ class CausalAgent(BaseAgent):
             'scm_state_dict': self.scm.state_dict(),
             'pyro_param_store': self.scm.get_pyro_param_store(),
         }, path)
-
 class ActiveInferenceAgent(BaseAgent):
     def __init__(self, action_space, state_dim):
         super(ActiveInferenceAgent, self).__init__(action_space, state_dim)
         self.action_dim = len(action_space)
+        print(f"Initializing ActiveInferenceAgent with state_dim={state_dim}, action_dim={self.action_dim}")
         self.generative_model = CVAE(input_dim=state_dim, latent_dim=20, condition_dim=self.action_dim)
         self.optimizer = optim.Adam(self.generative_model.parameters(), lr=1e-3)
         self.prior_preferences = torch.zeros(state_dim)
@@ -89,7 +89,7 @@ class ActiveInferenceAgent(BaseAgent):
             expected_state = self.predict_state(state, action)
             efe_action = self.compute_expected_free_energy(expected_state)
             efe.append(efe_action)
-    
+        
         # Choose action that minimizes expected free energy
         action = self.action_space[np.argmin(efe)]
         return action
@@ -110,10 +110,11 @@ class ActiveInferenceAgent(BaseAgent):
     
     def update_model(self, batch):
         states, actions, rewards, next_states, dones = zip(*batch)
-        states_tensors = torch.FloatTensor(states)
+        # Fix for the UserWarning
+        states_tensors = torch.FloatTensor(np.array(states))
         actions_tensors = torch.stack([self.action_to_tensor(a) for a in actions])
-        next_states_tensors = torch.FloatTensor(next_states)
-    
+        next_states_tensors = torch.FloatTensor(np.array(next_states))
+
         # Update generative model
         self.optimizer.zero_grad()
         recon_next_states, mu, logvar = self.generative_model(states_tensors, actions_tensors)
