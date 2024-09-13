@@ -110,9 +110,20 @@ class ActiveInferenceAgent(BaseAgent):
     
     def update_model(self, batch):
         states, actions, rewards, next_states, dones = zip(*batch)
-        states_tensors = torch.FloatTensor(states)
-        actions_tensors = torch.stack([self.action_to_tensor(a) for a in actions])
-        next_states_tensors = torch.FloatTensor(next_states)
+        
+        # Convert lists of numpy arrays to single numpy arrays
+        states_np = np.array(states)
+        actions_np = np.array(actions)
+        next_states_np = np.array(next_states)
+        rewards_np = np.array(rewards)
+        dones_np = np.array(dones)
+        
+        # Convert numpy arrays to PyTorch tensors
+        states_tensors = torch.FloatTensor(states_np)
+        actions_tensors = torch.stack([self.action_to_tensor(a) for a in actions_np])
+        next_states_tensors = torch.FloatTensor(next_states_np)
+        rewards_tensors = torch.FloatTensor(rewards_np)
+        dones_tensors = torch.FloatTensor(dones_np)
     
         # Update generative model
         self.optimizer.zero_grad()
