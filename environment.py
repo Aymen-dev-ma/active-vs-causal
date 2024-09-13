@@ -51,15 +51,15 @@ class GameEnvironment:
             self.current_s[index, 1] += 1
 
         # Berechne die Belohnung basierend auf dem neuen Zustand
-        reward = -np.sum(np.abs(self.current_s[index]))
+        reward = -torch.sum(torch.abs(self.current_s[index])).item()
 
         # Überprüfe, ob das Spiel beendet ist
-        done = np.all(self.current_s[index] == 0)
+        done = torch.all(self.current_s[index] == 0).item()
 
         # Aktualisiere den Abschlussstatus
         self.done[index] = done
 
-        return self.current_s[index], reward, done
+        return self.current_s[index].numpy(), reward, done
 
     def sample_s(self):  # Reward is zero after this!
         s = torch.zeros(self.s_dim - 1, dtype=torch.float32)
