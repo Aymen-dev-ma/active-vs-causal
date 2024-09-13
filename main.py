@@ -6,6 +6,7 @@ import numpy as np
 from environment import GameEnvironment
 from agent import CausalAgent, ActiveInferenceAgent
 from utils import ReplayBuffer
+import matplotlib.pyplot as plt
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Active Inference vs Causal Agent')
@@ -16,12 +17,24 @@ def parse_arguments():
     parser.add_argument('--save_model', type=str, default='trained_agent.pth', help='Path to save the trained model')
     return parser.parse_args()
 
+def plot_results(results):
+    plt.figure(figsize=(12, 6))
+    
+    for agent_name, rewards in results.items():
+        plt.plot(rewards, label=f'{agent_name.capitalize()} Agent')
+    
+    plt.xlabel('Step')
+    plt.ylabel('Reward')
+    plt.title('Agent Performance Comparison')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
 def train_agent(agent, env, buffer, args):
-    total_rewards = []
+    all_rewards = []
     for episode in range(args.episodes):
         state = env.reset()
         done = False
-        total_reward = 0.0
         step = 0
 
         print(f"Starting Episode {episode + 1}")
@@ -31,7 +44,7 @@ def train_agent(agent, env, buffer, args):
             next_state, reward, done = env.step(action)
             buffer.push(state, action, reward, next_state, done)
             state = next_state
-            total_reward += reward
+            all_rewards.append(reward)
             step += 1
 
             # Print step information
@@ -42,9 +55,8 @@ def train_agent(agent, env, buffer, args):
                 batch = buffer.sample(args.batch_size)
                 agent.update_model(batch)
 
-        total_rewards.append(total_reward)
-        print(f'Episode {episode + 1}/{args.episodes}, Total Reward: {total_reward}, Steps: {step}')
-    return total_rewards
+        print(f'Episode {episode + 1}/{args.episodes}, Total Reward: {sum(all_rewards[-step:])}, Steps: {step}')
+    return all_rewards
 
 def main():
     args = parse_arguments()
@@ -67,14 +79,17 @@ def main():
         for agent_name, agent in agents.items():
             print(f"\nTraining {agent_name.capitalize()} Agent")
             buffer = ReplayBuffer(capacity=10000)
-            total_rewards = train_agent(agent, env, buffer, args)
-            results[agent_name] = total_rewards
+            all_rewards = train_agent(agent, env, buffer, args)
+            results[agent_name] = all_rewards
             env.reset()
         # Compare results
         print("\nComparison of Agents:")
         for agent_name in agents.keys():
             avg_reward = np.mean(results[agent_name])
             print(f"{agent_name.capitalize()} Agent Average Reward: {avg_reward}")
+        
+        # Plot results
+        plot_results(results)
     else:
         # Initialize agent
         if args.agent == 'causal':
@@ -88,12 +103,15 @@ def main():
         buffer = ReplayBuffer(capacity=10000)
         
         # Train agent
-        total_rewards = train_agent(agent, env, buffer, args)
-        avg_reward = np.mean(total_rewards)
+        all_rewards = train_agent(agent, env, buffer, args)
+        avg_reward = np.mean(all_rewards)
         print(f"\n{args.agent.capitalize()} Agent Average Reward: {avg_reward}")
         
         # Save the trained model
         agent.save_model(args.save_model)
+        
+        # Plot results for the single agent
+        plot_results({args.agent: all_rewards})
 
 if __name__ == '__main__':
     main()
