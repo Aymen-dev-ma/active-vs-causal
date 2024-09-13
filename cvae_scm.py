@@ -51,7 +51,7 @@ class SCM(PyroModule):
         self.state_dim = state_dim
         self.action_dim = action_dim
 
-        # Prior distributions for the parameters
+        # Define parameters as PyroSamples
         self.linear_state = PyroModule[nn.Linear](state_dim + action_dim, state_dim)
         self.linear_state.weight = PyroSample(dist.Normal(0., 1.).expand([state_dim, state_dim + action_dim]).to_event(2))
         self.linear_state.bias = PyroSample(dist.Normal(0., 10.).expand([state_dim]).to_event(1))
@@ -61,30 +61,36 @@ class SCM(PyroModule):
         self.linear_reward.bias = PyroSample(dist.Normal(0., 10.).expand([1]).to_event(1))
 
     def model(self, s, a, s_next=None, r=None):
-        # Generative model (probabilistic structural equations)
         batch_size = s.size(0)
-        with pyro.plate("data", batch_size):
-            # Sample parameters (weights and biases)
-            weight_state = self.linear_state.weight
-            bias_state = self.linear_state.bias
-            weight_reward = self.linear_reward.weight
-            bias_reward = self.linear_reward.bias
+        # Sample global parameters
+        sigma_s_next = pyro.sample("sigma_s_next", dist.HalfCauchy(scale=torch.ones(self.state_dim)).to_event(1))
+        sigma_r = pyro.sample("sigma_r", dist.HalfCauchy(scale=1.0))
 
-            # Compute mean of the next state
+        # Sample parameters (weights and biases)
+        weight_state = pyro.sample("linear_state.weight", dist.Normal(0., 1.).expand([self.state_dim, self.state_dim + self.action_dim]).to_event(2))
+        bias_state = pyro.sample("linear_state.bias", dist.Normal(0., 10.).expand([self.state_dim]).to_event(1))
+        weight_reward = pyro.sample("linear_reward.weight", dist.Normal(0., 1.).expand([1, self.state_dim]).to_event(2))
+        bias_reward = pyro.sample("linear_reward.bias", dist.Normal(0., 10.).expand([1]).to_event(1))
+
+        with pyro.plate("data", batch_size):
             sa = torch.cat([s, a], dim=1)
             mu_s_next = F.linear(sa, weight_state, bias_state)
 
-            # Sample next state
-            sigma_s_next = pyro.sample("sigma_s_next", dist.HalfCauchy(scale=1.0))
-            with pyro.poutine.scale(scale=5.0):  # Scaling the loss for s_next
-                pyro.sample("s_next", dist.Normal(mu_s_next, sigma_s_next).to_event(1), obs=s_next)
+            sigma_s_next_expanded = sigma_s_next.unsqueeze(0).expand_as(mu_s_next)
 
-            # Compute mean of the reward
+            if s_next is not None:
+                pyro.sample("s_next", dist.Normal(mu_s_next, sigma_s_next_expanded).to_event(1), obs=s_next)
+            else:
+                s_next = pyro.sample("s_next", dist.Normal(mu_s_next, sigma_s_next_expanded).to_event(1))
+
             mu_r = F.linear(s_next, weight_reward, bias_reward)
 
-            # Sample reward
-            sigma_r = pyro.sample("sigma_r", dist.HalfCauchy(scale=1.0))
-            pyro.sample("r", dist.Normal(mu_r, sigma_r).to_event(1), obs=r)
+            sigma_r_expanded = sigma_r.expand_as(mu_r)
+
+            if r is not None:
+                pyro.sample("r", dist.Normal(mu_r, sigma_r_expanded).to_event(1), obs=r)
+            else:
+                pyro.sample("r", dist.Normal(mu_r, sigma_r_expanded).to_event(1))
 
     def guide(self, s, a, s_next=None, r=None):
         # Variational distribution q
@@ -106,26 +112,26 @@ class SCM(PyroModule):
         pyro.sample("linear_reward.bias", dist.Normal(bias_reward_mean, bias_reward_std).to_event(1))
 
         # Sample noise scales
-        sigma_s_next = pyro.param("sigma_s_next_q", torch.tensor(1.0), constraint=dist.constraints.positive)
-        pyro.sample("sigma_s_next", dist.Delta(sigma_s_next))
-        sigma_r = pyro.param("sigma_r_q", torch.tensor(1.0), constraint=dist.constraints.positive)
-        pyro.sample("sigma_r", dist.Delta(sigma_r))
+        sigma_s_next_q = pyro.param("sigma_s_next_q", torch.ones(self.state_dim), constraint=dist.constraints.positive)
+        pyro.sample("sigma_s_next", dist.Delta(sigma_s_next_q).to_event(1))
+
+        sigma_r_q = pyro.param("sigma_r_q", torch.tensor(1.0), constraint=dist.constraints.positive)
+        pyro.sample("sigma_r", dist.Delta(sigma_r_q))
 
     def counterfactual(self, s, a):
-        # Counterfactual reasoning using the posterior predictive distribution
-        # s: [1, state_dim], a: [1, action_dim]
-        predictive = pyro.infer.Predictive(self.model, guide=self.guide, num_samples=100)
-        samples = predictive(s.repeat(100, 1), a.repeat(100, 1))
-        s_next_samples = samples["s_next"]
-        s_next_mean = s_next_samples.mean(dim=0)
-        return s_next_mean.unsqueeze(0)  # Return [1, state_dim]
+        try:
+            predictive = pyro.infer.Predictive(self.model, guide=self.guide, num_samples=100, return_sites=("s_next",))
+            samples = predictive(s, a)
+            s_next_samples = samples["s_next"]  # Shape: [num_samples, batch_size, state_dim]
+            s_next_mean = s_next_samples.mean(dim=0)  # Shape: [batch_size, state_dim]
+            return s_next_mean  # Return [batch_size, state_dim]
+        except Exception as e:
+            print(f"Exception in counterfactual: {e}")
+            return None
 
     def predict_reward(self, s):
-        # Predict reward from state
         with torch.no_grad():
-            weight_reward_mean = pyro.param("weight_reward_mean")
-            bias_reward_mean = pyro.param("bias_reward_mean")
-            mu_r = F.linear(s, weight_reward_mean, bias_reward_mean)
+            mu_r = self.linear_reward(s)  # s: [batch_size, state_dim], mu_r: [batch_size, 1]
             return mu_r.item()
 
     def update(self, s, a, s_next, r):
@@ -137,6 +143,13 @@ class SCM(PyroModule):
         num_iterations = 100  # Adjust as needed
         for i in range(num_iterations):
             loss = svi.step(s, a, s_next, r)
+
+        # After training, update the linear_reward and linear_state parameters
+        with torch.no_grad():
+            self.linear_reward.weight.copy_(pyro.param("weight_reward_mean"))
+            self.linear_reward.bias.copy_(pyro.param("bias_reward_mean"))
+            self.linear_state.weight.copy_(pyro.param("weight_state_mean"))
+            self.linear_state.bias.copy_(pyro.param("bias_state_mean"))
 
     def state_dict(self):
         # Return Pyro parameters

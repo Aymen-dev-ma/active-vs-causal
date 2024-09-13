@@ -6,6 +6,7 @@ import torch.optim as optim
 from cvae_scm import CVAE, SCM
 import torch.nn.functional as F
 import numpy as np
+import time
 
 class BaseAgent:
     def __init__(self, action_space, state_dim):
@@ -32,29 +33,36 @@ class CausalAgent(BaseAgent):
         super(CausalAgent, self).__init__(action_space, state_dim)
         self.action_dim = len(action_space)
         self.cvae = CVAE(input_dim=state_dim, latent_dim=20, condition_dim=self.action_dim)
+        print(f"Initialized CVAE fc1 with input_dim={state_dim + self.action_dim}, output_dim=256")
         self.scm = SCM(state_dim=state_dim, action_dim=self.action_dim)
         self.cvae_optimizer = optim.Adam(self.cvae.parameters(), lr=1e-3)
+        self.trained = False  # Flag to indicate if SCM has been trained
     
     def select_action(self, state):
+        # If the SCM has not been trained yet, select a random action
+        if not self.trained:
+            return np.random.choice(self.action_space)
         # Use SCM to compute counterfactual outcomes for each action
         state_tensor = torch.FloatTensor(state).unsqueeze(0)
         expected_rewards = []
         for action in self.action_space:
             action_tensor = self.action_to_tensor(action).unsqueeze(0)
             counterfactual_state = self.scm.counterfactual(state_tensor, action_tensor)
+            if counterfactual_state is None:
+                # If counterfactual failed, select a random action
+                return np.random.choice(self.action_space)
             reward_estimate = self.scm.predict_reward(counterfactual_state)
             expected_rewards.append(reward_estimate)
-    
         # Choose action with highest expected reward
         action = self.action_space[np.argmax(expected_rewards)]
         return action
     
     def update_model(self, batch):
         states, actions, rewards, next_states, dones = zip(*batch)
-        states_tensors = torch.FloatTensor(states)
+        states_tensors = torch.FloatTensor(np.array(states))
         actions_tensors = torch.stack([self.action_to_tensor(a) for a in actions])
         rewards_tensors = torch.FloatTensor(rewards).unsqueeze(1)
-        next_states_tensors = torch.FloatTensor(next_states)
+        next_states_tensors = torch.FloatTensor(np.array(next_states))
     
         # Update CVAE model
         self.cvae_optimizer.zero_grad()
@@ -65,6 +73,7 @@ class CausalAgent(BaseAgent):
     
         # Update SCM based on new data
         self.scm.update(states_tensors, actions_tensors, next_states_tensors, rewards_tensors)
+        self.trained = True  # Set trained flag to True
     
     def save_model(self, path):
         torch.save({
@@ -73,6 +82,7 @@ class CausalAgent(BaseAgent):
             'scm_state_dict': self.scm.state_dict(),
             'pyro_param_store': self.scm.get_pyro_param_store(),
         }, path)
+
 class ActiveInferenceAgent(BaseAgent):
     def __init__(self, action_space, state_dim):
         super(ActiveInferenceAgent, self).__init__(action_space, state_dim)
@@ -83,15 +93,17 @@ class ActiveInferenceAgent(BaseAgent):
         self.prior_preferences = torch.zeros(state_dim)
     
     def select_action(self, state):
+        start_time = time.time()
         # Compute expected free energy for each action
         efe = []
         for action in self.action_space:
             expected_state = self.predict_state(state, action)
             efe_action = self.compute_expected_free_energy(expected_state)
             efe.append(efe_action)
-        
         # Choose action that minimizes expected free energy
         action = self.action_space[np.argmin(efe)]
+        end_time = time.time()
+        print(f"select_action took {end_time - start_time:.4f} seconds")
         return action
     
     def predict_state(self, state, action):
@@ -109,18 +121,20 @@ class ActiveInferenceAgent(BaseAgent):
         return efe.item()
     
     def update_model(self, batch):
+        start_time = time.time()
         states, actions, rewards, next_states, dones = zip(*batch)
-        # Fix for the UserWarning
         states_tensors = torch.FloatTensor(np.array(states))
         actions_tensors = torch.stack([self.action_to_tensor(a) for a in actions])
         next_states_tensors = torch.FloatTensor(np.array(next_states))
-
+    
         # Update generative model
         self.optimizer.zero_grad()
         recon_next_states, mu, logvar = self.generative_model(states_tensors, actions_tensors)
         loss = self.generative_model.loss_function(recon_next_states, next_states_tensors, mu, logvar)
         loss.backward()
         self.optimizer.step()
+        end_time = time.time()
+        print(f"update_model took {end_time - start_time:.4f} seconds")
     
     def save_model(self, path):
         torch.save({
