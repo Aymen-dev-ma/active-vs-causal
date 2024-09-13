@@ -44,6 +44,7 @@ def main():
         state = env.reset()
         done = False
         total_reward = 0.0
+        step_count = 0  # Track the number of steps in the episode
     
         while not done:
             action = agent.select_action(state)
@@ -51,10 +52,14 @@ def main():
             buffer.push(state, action, reward, next_state, done)
             state = next_state
             total_reward += reward
+            step_count += 1  # Increment step count
     
             if len(buffer) > args.batch_size:
                 batch = buffer.sample(args.batch_size)
                 agent.update_model(batch)
+    
+            # Debug print to track progress
+            print(f'Episode {episode + 1}, Step {step_count}, Action: {action}, Reward: {reward}, Done: {done}')
     
         print(f'Episode {episode + 1}/{args.episodes}, Total Reward: {total_reward}')
     
