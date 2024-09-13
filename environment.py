@@ -39,15 +39,27 @@ class GameEnvironment:
         state = state.view(-1).numpy()
         return state
 
-    def step(self, action):
-        done = False
-        reward = 0.0
-        for index in range(self.games_no):
-            self.pi_to_action(action, index)
-            reward += self.get_reward(index).item()
-        state = self.current_frame_all()
-        state = state.view(-1).numpy()
-        return state, reward, done
+    def step(self, action, index=0):
+        # Aktualisiere den Zustand basierend auf der Aktion
+        if action == 0:  # Beispielaktion: nach oben
+            self.current_s[index, 0] += 1
+        elif action == 1:  # Beispielaktion: nach unten
+            self.current_s[index, 0] -= 1
+        elif action == 2:  # Beispielaktion: nach links
+            self.current_s[index, 1] -= 1
+        elif action == 3:  # Beispielaktion: nach rechts
+            self.current_s[index, 1] += 1
+
+        # Berechne die Belohnung basierend auf dem neuen Zustand
+        reward = -np.sum(np.abs(self.current_s[index]))
+
+        # Überprüfe, ob das Spiel beendet ist
+        done = np.all(self.current_s[index] == 0)
+
+        # Aktualisiere den Abschlussstatus
+        self.done[index] = done
+
+        return self.current_s[index], reward, done
 
     def sample_s(self):  # Reward is zero after this!
         s = torch.zeros(self.s_dim - 1, dtype=torch.float32)
