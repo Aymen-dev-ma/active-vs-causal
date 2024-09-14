@@ -134,3 +134,70 @@ class MCTS:
         # Simple reward function based on state (e.g., sum of pixel values)
         reward = -torch.abs(state.sum() - (self.cvae.image_dim / 2))
         return reward.item()
+class CausalUCTNode:
+    def __init__(self, state, parent, action, agent):
+        self.state = state  # Numpy array
+        self.parent = parent
+        self.action = action
+        self.agent = agent
+        self.children = {}
+        self.visit_count = 0
+        self.total_value = 0.0
+        self.is_terminal_node = False
+        self.untried_actions = agent.action_space.copy()
+
+    def is_leaf(self):
+        return len(self.children) == 0
+
+    def is_terminal(self):
+        return self.is_terminal_node
+
+    def expand(self, action, next_state):
+        child_node = CausalUCTNode(next_state, self, action, self.agent)
+        self.children[action] = child_node
+        return child_node
+
+    def select_child(self):
+        best_score = -float('inf')
+        best_action = None
+        best_child = None
+        for action, child in self.children.items():
+            # Calculate causal UCT value
+            q_value = child.total_value / (child.visit_count + 1e-5)
+            u_value = self.agent.c_puct * math.sqrt(math.log(self.visit_count + 1) / (child.visit_count + 1e-5))
+            causal_effect = self.estimate_causal_effect(action)
+            uct_value = q_value + u_value + causal_effect
+            if uct_value > best_score:
+                best_score = uct_value
+                best_action = action
+                best_child = child
+        return best_action, best_child
+
+    def estimate_causal_effect(self, action):
+        # Estimate causal effect using the SCM
+        state_tensor = torch.FloatTensor(self.state).unsqueeze(0)
+        action_tensor = self.agent.action_to_tensor(action).unsqueeze(0)
+        counterfactual_state = self.agent.scm.counterfactual(state_tensor, action_tensor)
+        if counterfactual_state is None:
+            return 0.0
+        reward_estimate = self.agent.scm.predict_reward(counterfactual_state)
+        # Adjust reward estimate for causal effect
+        baseline_reward = self.agent.scm.predict_reward(state_tensor)
+        causal_effect = reward_estimate - baseline_reward
+        return causal_effect.item()
+
+    def backpropagate(self, reward):
+        self.visit_count += 1
+        self.total_value += reward
+        if self.parent:
+            self.parent.backpropagate(reward)
+
+    def best_action(self):
+        # Return the action with the highest visit count
+        best_visit = -float('inf')
+        best_action = None
+        for action, child in self.children.items():
+            if child.visit_count > best_visit:
+                best_visit = child.visit_count
+                best_action = action
+        return best_action

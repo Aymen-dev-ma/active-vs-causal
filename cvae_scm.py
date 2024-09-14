@@ -53,12 +53,20 @@ class SCM(PyroModule):
 
         # Define parameters as PyroSamples
         self.linear_state = PyroModule[nn.Linear](state_dim + action_dim, state_dim)
-        self.linear_state.weight = PyroSample(dist.Normal(0., 1.).expand([state_dim, state_dim + action_dim]).to_event(2))
-        self.linear_state.bias = PyroSample(dist.Normal(0., 10.).expand([state_dim]).to_event(1))
+        self.linear_state.weight = PyroSample(
+            dist.Normal(0., 1.).expand([state_dim, state_dim + action_dim]).to_event(2)
+        )
+        self.linear_state.bias = PyroSample(
+            dist.Normal(0., 10.).expand([state_dim]).to_event(1)
+        )
 
         self.linear_reward = PyroModule[nn.Linear](state_dim, 1)
-        self.linear_reward.weight = PyroSample(dist.Normal(0., 1.).expand([1, state_dim]).to_event(2))
-        self.linear_reward.bias = PyroSample(dist.Normal(0., 10.).expand([1]).to_event(1))
+        self.linear_reward.weight = PyroSample(
+            dist.Normal(0., 1.).expand([1, state_dim]).to_event(2)
+        )
+        self.linear_reward.bias = PyroSample(
+            dist.Normal(0., 10.).expand([1]).to_event(1)
+        )
 
     def model(self, s, a, s_next=None, r=None):
         batch_size = s.size(0)
@@ -158,6 +166,101 @@ class SCM(PyroModule):
     def load_state_dict(self, state_dict):
         # Load Pyro parameters
         pyro.get_param_store().set_state(state_dict)
-
+    def elbo_loss(self, s, a, s_next, r):
+        # Compute the Evidence Lower Bound (ELBO) loss
+        pyro.clear_param_store()
+        loss_fn = pyro.infer.Trace_ELBO()
+        loss = loss_fn.differentiable_loss(self.model, self.guide, s, a, s_next, r)
+        return loss
     def get_pyro_param_store(self):
         return pyro.get_param_store().get_state()
+class CEVAE(nn.Module):
+    def __init__(self, input_dim, latent_dim, treatment_dim):
+        super(CEVAE, self).__init__()
+        self.input_dim = input_dim
+        self.latent_dim = latent_dim
+        self.treatment_dim = treatment_dim
+
+        # Inference network q(z | x, t, y)
+        self.encoder = nn.Sequential(
+            nn.Linear(input_dim + treatment_dim + 1, 200),
+            nn.ReLU(),
+            nn.Linear(200, 200),
+            nn.ReLU(),
+        )
+        self.enc_mu = nn.Linear(200, latent_dim)
+        self.enc_logvar = nn.Linear(200, latent_dim)
+
+        # Generative networks
+        # p(x | z)
+        self.decoder_x = nn.Sequential(
+            nn.Linear(latent_dim, 200),
+            nn.ReLU(),
+            nn.Linear(200, input_dim),
+        )
+        # p(t | z)
+        self.decoder_t = nn.Sequential(
+            nn.Linear(latent_dim, 200),
+            nn.ReLU(),
+            nn.Linear(200, treatment_dim),
+            nn.Softmax(dim=1),
+        )
+        # p(y | t, z)
+        self.decoder_y = nn.Sequential(
+            nn.Linear(latent_dim + treatment_dim, 200),
+            nn.ReLU(),
+            nn.Linear(200, 1),
+        )
+
+    def encode(self, x, t, y):
+        input = torch.cat([x, t, y], dim=1)
+        h = self.encoder(input)
+        mu = self.enc_mu(h)
+        logvar = self.enc_logvar(h)
+        return mu, logvar
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+
+    def decode_x(self, z):
+        return self.decoder_x(z)
+
+    def decode_t(self, z):
+        return self.decoder_t(z)
+
+    def decode_y(self, z, t):
+        input = torch.cat([z, t], dim=1)
+        return self.decoder_y(input)
+
+    def forward(self, x, t, y):
+        mu, logvar = self.encode(x, t, y)
+        z = self.reparameterize(mu, logvar)
+        x_recon = self.decode_x(z)
+        t_recon = self.decode_t(z)
+        y_recon = self.decode_y(z, t)
+        return x_recon, t_recon, y_recon, mu, logvar
+
+    def loss_function(self, x, t, y):
+        x_recon, t_recon, y_recon, mu, logvar = self.forward(x, t, y)
+        # Reconstruction losses
+        recon_x_loss = F.mse_loss(x_recon, x, reduction='mean')
+        recon_t_loss = F.cross_entropy(t_recon, t.argmax(dim=1), reduction='mean')
+        recon_y_loss = F.mse_loss(y_recon, y, reduction='mean')
+        # KL divergence
+        KLD = -0.5 * torch.mean(1 + logvar - mu.pow(2) - logvar.exp())
+        # Total loss
+        loss = recon_x_loss + recon_t_loss + recon_y_loss + KLD
+        return loss
+
+    def predict_counterfactual(self, x, t):
+        with torch.no_grad():
+            # Encode x to get q(z | x)
+            h = self.encoder(torch.cat([x, torch.zeros_like(t), torch.zeros((t.size(0), 1))], dim=1))
+            mu = self.enc_mu(h)
+            logvar = self.enc_logvar(h)
+            z = self.reparameterize(mu, logvar)
+            # Decode y given z and t
+            y_pred = self.decode_y(z, t)
+            return y_pred.squeeze(1)
