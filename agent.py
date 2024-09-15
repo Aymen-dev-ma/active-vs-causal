@@ -7,12 +7,14 @@ from cvae_scm import CVAE, SCM
 import torch.nn.functional as F
 import numpy as np
 import time
+from frontdoor_scm import FrontdoorCVAE, FrontdoorSCM
 #from mcts import CausalUCTNode
 import math
 from cvae_scm import CVAE, SCM, CEVAE
 import random
 import pyro
 from pyro.infer import SVI, Trace_ELBO
+from pyro.infer.autoguide import AutoNormal  # Import AutoGuide
 
 class BaseAgent:
     def __init__(self, action_space, state_dim):
@@ -268,7 +270,7 @@ class IPSAgent(BaseAgent):
         }, path)
 
 class CausalUCTAgent(BaseAgent):
-    def __init__(self, action_space, state_dim, uct_simulations=50):
+    def __init__(self, action_space, state_dim, uct_simulations=10):
         super(CausalUCTAgent, self).__init__(action_space, state_dim)
         self.action_dim = len(action_space)
         self.scm = SCM(state_dim=state_dim, action_dim=self.action_dim)
@@ -280,6 +282,14 @@ class CausalUCTAgent(BaseAgent):
         self.uct_simulations = uct_simulations
         self.c_puct = 1.0
 
+        # Value function approximator
+        self.value_network = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        self.value_optimizer = optim.Adam(self.value_network.parameters(), lr=1e-3)
+
     def select_action(self, state):
         if not self.trained:
             return np.random.choice(self.action_space)
@@ -289,57 +299,48 @@ class CausalUCTAgent(BaseAgent):
             state_copy = torch.FloatTensor(state).unsqueeze(0)
             path = []
 
-            # Selection and Expansion
-            while node.is_fully_expanded() and not node.is_terminal():
-                action, node = node.select_child(self.c_puct)
-                action_tensor = self.action_to_tensor(action).unsqueeze(0)
-                next_state = self.scm.counterfactual(state_copy, action_tensor)
-                if next_state is None:
-                    break
-                state_copy = next_state
-                path.append((node, action))
-
-            # Expansion
-            if not node.is_terminal():
-                untried_actions = [a for a in self.action_space if a not in node.children]
-                if untried_actions:
+            # Selection
+            while not node.is_terminal():
+                if not node.is_fully_expanded():
+                    # Expansion
+                    untried_actions = [a for a in self.action_space if a not in node.children]
                     action = random.choice(untried_actions)
                     action_tensor = self.action_to_tensor(action).unsqueeze(0)
                     next_state = self.scm.counterfactual(state_copy, action_tensor)
-                    if next_state is not None:
-                        child_node = node.expand(action, next_state.squeeze(0).numpy())
-                        # Simulation
-                        reward = self.scm.predict_reward(next_state)
-                        # Backpropagation
-                        child_node.backpropagate(reward)  # Remove .item()
-                        continue  # Go to next UCT simulation
-
-            # Simulation
-            reward = self.rollout(state_copy)
+                    if next_state is None:
+                        break
+                    next_state_np = next_state.squeeze(0).numpy()
+                    child_node = node.expand(action, next_state_np)
+                    # Evaluate using value function
+                    value = self.value_network(torch.FloatTensor(next_state_np)).item()
+                    # Backpropagation
+                    child_node.backpropagate(value)
+                    break  # Only expand one node at a time
+                else:
+                    # Select best child
+                    action, node = node.select_child(self.c_puct)
+                    action_tensor = self.action_to_tensor(action).unsqueeze(0)
+                    next_state = self.scm.counterfactual(state_copy, action_tensor)
+                    if next_state is None:
+                        break
+                    state_copy = next_state
+                    path.append((node, action))
 
             # Backpropagation
-            node.backpropagate(reward)
+            # If node is terminal or leaf, use value function to estimate value
+            if node.is_terminal():
+                value = 0
+            else:
+                state_tensor = torch.FloatTensor(node.state).unsqueeze(0)
+                value = self.value_network(state_tensor).item()
+            node.backpropagate(value)
 
         best_action = root.best_action()
         return best_action
 
     def rollout(self, state):
-        max_rollout_depth = 5
-        total_reward = 0
-        depth = 0
-        state_copy = state.clone()
-        while depth < max_rollout_depth:
-            action = np.random.choice(self.action_space)
-            action_tensor = self.action_to_tensor(action).unsqueeze(0)
-            next_state = self.scm.counterfactual(state_copy, action_tensor)
-            if next_state is None:
-                break
-            reward = self.scm.predict_reward(next_state)
-            total_reward += reward  # Remove .item()
-            state_copy = next_state
-            depth += 1
-        return total_reward
-
+        # No longer needed since we use the value function
+        pass
 
     def update_model(self, batch):
         states, actions, rewards, next_states, dones = zip(*batch)
@@ -348,32 +349,49 @@ class CausalUCTAgent(BaseAgent):
         rewards_tensors = torch.FloatTensor(rewards).unsqueeze(1)
         next_states_tensors = torch.FloatTensor(np.array(next_states))
 
-        # Use SVI to update the SCM parameters
-        num_iterations = 1  # You can adjust this as needed
+        # Update SCM using SVI
+        num_iterations = 1
         for _ in range(num_iterations):
             loss = self.svi.step(states_tensors, actions_tensors, next_states_tensors, rewards_tensors)
+        
+        # Update value network
+        self.value_optimizer.zero_grad()
+        # Compute target values using rewards and bootstrap from value network
+        with torch.no_grad():
+            next_values = self.value_network(next_states_tensors)
+            targets = rewards_tensors + 0.99 * next_values * (1 - torch.FloatTensor(dones).unsqueeze(1))
+        values = self.value_network(states_tensors)
+        value_loss = F.mse_loss(values, targets)
+        value_loss.backward()
+        self.value_optimizer.step()
 
         self.trained = True
 
     def save_model(self, path):
-        # Save Pyro's parameter store state
-        pyro.get_param_store().save(path)
+        # Save Pyro's parameter store and value network state
+        torch.save({
+            'value_network_state_dict': self.value_network.state_dict(),
+            'value_optimizer_state_dict': self.value_optimizer.state_dict(),
+            'pyro_param_store': pyro.get_param_store().get_state(),
+        }, path)
 
 class UCTNode:
     def __init__(self, state, parent, action, agent):
-        self.state = state
+        self.state = state  # Numpy array
         self.parent = parent
         self.action = action
         self.agent = agent
         self.children = {}
         self.visit_count = 0
         self.total_value = 0.0
+        self.is_terminal_node = False
 
     def is_fully_expanded(self):
         return len(self.children) == len(self.agent.action_space)
 
     def is_terminal(self):
-        return False
+        # Define terminal condition if necessary
+        return False  # Modify as per your environment
 
     def expand(self, action, next_state):
         child_node = UCTNode(next_state, self, action, self.agent)
@@ -385,10 +403,11 @@ class UCTNode:
         best_action = None
         best_child = None
         for action, child in self.children.items():
-            ucb = (child.total_value / (child.visit_count + 1e-5)) + \
-                  c_puct * math.sqrt(math.log(self.visit_count + 1) / (child.visit_count + 1e-5))
-            if ucb > best_score:
-                best_score = ucb
+            q_value = child.total_value / (child.visit_count + 1e-5)
+            u_value = c_puct * math.sqrt(math.log(self.visit_count + 1) / (child.visit_count + 1e-5))
+            score = q_value + u_value
+            if score > best_score:
+                best_score = score
                 best_action = action
                 best_child = child
         return best_action, best_child
@@ -400,6 +419,190 @@ class UCTNode:
             self.parent.backpropagate(value)
 
     def best_action(self):
+        # Return the action with the highest visit count
+        best_visit = -float('inf')
+        best_action = None
+        for action, child in self.children.items():
+            if child.visit_count > best_visit:
+                best_visit = child.visit_count
+                best_action = action
+        return best_action
+    
+    
+class FrontdoorAgent(BaseAgent):
+    def __init__(self, action_space, state_dim, mcts_simulations=10):
+        super(FrontdoorAgent, self).__init__(action_space, state_dim)
+        self.action_dim = len(action_space)
+
+        # Initialize FrontdoorCVAE
+        self.cvae = FrontdoorCVAE(input_dim=state_dim, latent_dim=10, action_dim=self.action_dim)
+        self.cvae_optimizer = optim.Adam(self.cvae.parameters(), lr=1e-3)
+
+        # Initialize FrontdoorSCM
+  # Initialize SCM
+        self.scm = FrontdoorSCM(state_dim=state_dim, action_dim=self.action_dim, latent_dim=10)
+        # Pyro optimizer and SVI for SCM
+        self.pyro_optimizer = pyro.optim.Adam({"lr": 1e-3})
+        # Use AutoNormal guide
+        self.guide = AutoNormal(self.scm.model)
+        self.svi = SVI(self.scm.model, self.guide, self.pyro_optimizer, loss=Trace_ELBO())
+
+        self.trained = False
+        self.mcts_simulations = mcts_simulations
+        self.c_puct = 1.0
+
+        # Value function approximator
+        self.value_network = nn.Sequential(
+            nn.Linear(state_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, 1)
+        )
+        self.value_optimizer = optim.Adam(self.value_network.parameters(), lr=1e-3)
+
+    def select_action(self, state):
+        if not self.trained:
+            return np.random.choice(self.action_space)
+        root = FrontdoorMCTSNode(state, None, None, self)
+        for _ in range(self.mcts_simulations):
+            node = root
+            state_copy = torch.FloatTensor(state).unsqueeze(0)
+            path = []
+
+            # Selection and Expansion
+            while not node.is_terminal():
+                if not node.is_fully_expanded():
+                    # Expansion
+                    untried_actions = [a for a in self.action_space if a not in node.children]
+                    action = random.choice(untried_actions)
+                    action_tensor = self.action_to_tensor(action).unsqueeze(0)
+                    # Generate next state using SCM and CVAE with front-door adjustment
+                    next_state = self.generate_next_state(state_copy, action_tensor)
+                    if next_state is None:
+                        break
+                    next_state_np = next_state.squeeze(0).numpy()
+                    child_node = node.expand(action, next_state_np)
+                    # Evaluate using value function
+                    value = self.value_network(torch.FloatTensor(next_state_np)).item()
+                    # Backpropagation
+                    child_node.backpropagate(value)
+                    break  # Only expand one node at a time
+                else:
+                    # Select best child
+                    action, node = node.select_child(self.c_puct)
+                    action_tensor = self.action_to_tensor(action).unsqueeze(0)
+                    next_state = self.generate_next_state(state_copy, action_tensor)
+                    if next_state is None:
+                        break
+                    state_copy = next_state
+                    path.append((node, action))
+
+            # Backpropagation
+            if node.is_terminal():
+                value = 0
+            else:
+                state_tensor = torch.FloatTensor(node.state).unsqueeze(0)
+                value = self.value_network(state_tensor).item()
+            node.backpropagate(value)
+
+        best_action = root.best_action()
+        return best_action
+
+    def generate_next_state(self, s, a):
+        # Use front-door adjustment to generate the next state
+        with torch.no_grad():
+            # Sample latent variable z using the CVAE encoder
+            mu, logvar = self.cvae.encode(s)
+            z = self.cvae.reparameterize(mu, logvar)
+            # Generate next state using the SCM's counterfactual method
+            s_next = self.scm.counterfactual(s, a, z)
+            return s_next
+
+    def update_model(self, batch):
+        states, actions, rewards, next_states, dones = zip(*batch)
+        states_tensors = torch.FloatTensor(np.array(states))
+        actions_tensors = torch.stack([self.action_to_tensor(a) for a in actions])
+        rewards_tensors = torch.FloatTensor(rewards).unsqueeze(1)
+        next_states_tensors = torch.FloatTensor(np.array(next_states))
+
+        # Update CVAE
+        self.cvae_optimizer.zero_grad()
+        recon_batch, mu, logvar = self.cvae(states_tensors, actions_tensors)
+        cvae_loss = self.cvae.loss_function(recon_batch, states_tensors, mu, logvar)
+        cvae_loss.backward()
+        self.cvae_optimizer.step()
+
+        # Update SCM using SVI
+        num_iterations = 1
+        for _ in range(num_iterations):
+            loss = self.svi.step(states_tensors, actions_tensors, next_states_tensors, rewards_tensors)
+
+        # Update value network
+        self.value_optimizer.zero_grad()
+        with torch.no_grad():
+            next_values = self.value_network(next_states_tensors)
+            dones_tensors = torch.FloatTensor(dones).unsqueeze(1)
+            targets = rewards_tensors + 0.99 * next_values * (1 - dones_tensors)
+        values = self.value_network(states_tensors)
+        value_loss = F.mse_loss(values, targets)
+        value_loss.backward()
+        self.value_optimizer.step()
+
+        self.trained = True
+
+    def save_model(self, path):
+        torch.save({
+            'cvae_state_dict': self.cvae.state_dict(),
+            'cvae_optimizer_state_dict': self.cvae_optimizer.state_dict(),
+            'value_network_state_dict': self.value_network.state_dict(),
+            'value_optimizer_state_dict': self.value_optimizer.state_dict(),
+            'pyro_param_store': pyro.get_param_store().get_state(),
+        }, path)
+
+class FrontdoorMCTSNode:
+    def __init__(self, state, parent, action, agent):
+        self.state = state  # Numpy array
+        self.parent = parent
+        self.action = action
+        self.agent = agent
+        self.children = {}
+        self.visit_count = 0
+        self.total_value = 0.0
+        self.is_terminal_node = False
+
+    def is_fully_expanded(self):
+        return len(self.children) == len(self.agent.action_space)
+
+    def is_terminal(self):
+        # Define terminal condition if necessary
+        return False
+
+    def expand(self, action, next_state):
+        child_node = FrontdoorMCTSNode(next_state, self, action, self.agent)
+        self.children[action] = child_node
+        return child_node
+
+    def select_child(self, c_puct):
+        best_score = -float('inf')
+        best_action = None
+        best_child = None
+        for action, child in self.children.items():
+            q_value = child.total_value / (child.visit_count + 1e-5)
+            u_value = c_puct * math.sqrt(math.log(self.visit_count + 1) / (child.visit_count + 1e-5))
+            score = q_value + u_value
+            if score > best_score:
+                best_score = score
+                best_action = action
+                best_child = child
+        return best_action, best_child
+
+    def backpropagate(self, value):
+        self.visit_count += 1
+        self.total_value += value
+        if self.parent:
+            self.parent.backpropagate(value)
+
+    def best_action(self):
+        # Return the action with the highest visit count
         best_visit = -float('inf')
         best_action = None
         for action, child in self.children.items():

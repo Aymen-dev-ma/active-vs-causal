@@ -3,9 +3,9 @@
 import argparse
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
 from environment import GameEnvironment
 from agent import (
+    FrontdoorAgent,
     CausalUCTAgent,
     CausalAgent,
     ActiveInferenceAgent,
@@ -17,9 +17,9 @@ from utils import ReplayBuffer
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Agent Comparison')
     parser.add_argument('--agent', type=str,
-                        choices=['uct', 'causal', 'active', 'cevae', 'ips', 'all'],
+                        choices=['frontdoor', 'uct', 'causal', 'active', 'cevae', 'ips', 'all'],
                         default='all',
-                        help='Type of agent to use: uct, causal, active, cevae, ips, or all')
+                        help='Type of agent to use: frontdoor, uct, causal, active, cevae, ips, or all')
     parser.add_argument('--episodes', type=int, default=10,
                         help='Number of training episodes')
     parser.add_argument('--batch_size', type=int, default=64,
@@ -29,10 +29,11 @@ def parse_arguments():
     return parser.parse_args()
 
 def train_agent(agent, env, buffer, args, agent_name):
-    step_rewards = []
+    total_rewards = []
     for episode in range(args.episodes):
         state = env.reset()
         done = False
+        total_reward = 0.0
         step = 0
 
         print(f"Starting Episode {episode + 1}")
@@ -42,25 +43,16 @@ def train_agent(agent, env, buffer, args, agent_name):
             next_state, reward, done = env.step(action)
             buffer.push(state, action, reward, next_state, done)
             state = next_state
-            step_rewards.append(reward)
+            total_reward += reward
             step += 1
 
             if len(buffer) >= args.batch_size:
                 batch = buffer.sample(args.batch_size)
                 agent.update_model(batch)
 
-        print(f'Episode {episode + 1}/{args.episodes}, Steps: {step}')
-    return step_rewards
-
-def plot_rewards(results):
-    plt.figure(figsize=(10, 6))
-    for agent_name, rewards in results.items():
-        plt.plot(rewards, label=f'{agent_name.capitalize()} Agent')
-    plt.xlabel('Step')
-    plt.ylabel('Reward')
-    plt.title('Training Rewards per Step')
-    plt.legend()
-    plt.show()
+        total_rewards.append(total_reward)
+        print(f'Episode {episode + 1}/{args.episodes}, Total Reward: {total_reward}, Steps: {step}')
+    return total_rewards
 
 def main():
     args = parse_arguments()
@@ -74,6 +66,7 @@ def main():
 
     if args.agent == 'all':
         agents = {
+            'frontdoor': FrontdoorAgent(action_space=action_space, state_dim=state_dim),
             'uct': CausalUCTAgent(action_space=action_space, state_dim=state_dim),
             'causal': CausalAgent(action_space=action_space, state_dim=state_dim),
             'active': ActiveInferenceAgent(action_space=action_space, state_dim=state_dim),
@@ -84,18 +77,17 @@ def main():
         for agent_name, agent in agents.items():
             print(f"\nTraining {agent_name.capitalize()} Agent")
             buffer = ReplayBuffer(capacity=10000)
-            step_rewards = train_agent(agent, env, buffer, args, agent_name)
-            results[agent_name] = step_rewards
+            total_rewards = train_agent(agent, env, buffer, args, agent_name)
+            results[agent_name] = total_rewards
             env.reset()
         print("\nComparison of Agents:")
         for agent_name in agents.keys():
             avg_reward = np.mean(results[agent_name])
             print(f"{agent_name.capitalize()} Agent Average Reward: {avg_reward}")
-        
-        # Plot the rewards
-        plot_rewards(results)
     else:
-        if args.agent == 'uct':
+        if args.agent == 'frontdoor':
+            agent = FrontdoorAgent(action_space=action_space, state_dim=state_dim)
+        elif args.agent == 'uct':
             agent = CausalUCTAgent(action_space=action_space, state_dim=state_dim)
         elif args.agent == 'causal':
             agent = CausalAgent(action_space=action_space, state_dim=state_dim)
@@ -109,14 +101,11 @@ def main():
             raise ValueError('Invalid agent type')
 
         buffer = ReplayBuffer(capacity=10000)
-        step_rewards = train_agent(agent, env, buffer, args, args.agent)
-        avg_reward = np.mean(step_rewards)
+        total_rewards = train_agent(agent, env, buffer, args, args.agent)
+        avg_reward = np.mean(total_rewards)
         print(f"\n{args.agent.capitalize()} Agent Average Reward: {avg_reward}")
 
         agent.save_model(args.save_model)
-        
-        # Plot the rewards for the single agent
-        plot_rewards({args.agent: step_rewards})
 
 if __name__ == '__main__':
     main()
