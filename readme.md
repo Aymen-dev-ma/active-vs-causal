@@ -439,3 +439,46 @@ flowchart TD
     H --> I[Experience (s, a, r, s')]
     I --> J[Update CVAE and SCM]
     J --> K[Next Iteration]
+# CausalUCTAgent
+
+## Introduction
+
+The `CausalUCTAgent` is a reinforcement learning agent that combines **Monte Carlo Tree Search (MCTS)** with **Causal Inference** using a **Structural Causal Model (SCM)**. This agent is designed to reason about the effects of actions in a dynamic environment by performing counterfactual reasoning. It uses **Upper Confidence bounds applied to Trees (UCT)** to balance exploration and exploitation during decision-making.
+
+## Features
+
+- **Causal Reasoning**: The agent uses an SCM to simulate interventions (i.e., actions) and predict the outcome based on the causal relationships between states and rewards.
+- **Monte Carlo Tree Search (MCTS)**: The agent builds a search tree to simulate future action trajectories and determine the optimal action sequence.
+- **UCT (Upper Confidence Bound for Trees)**: Ensures an optimal balance between exploring new actions and exploiting known good actions.
+- **Counterfactual Simulations**: The agent uses the SCM to simulate "what-if" scenarios, enabling it to evaluate the potential outcomes of different actions.
+
+## Algorithm
+
+The **CausalUCTAgent** operates by performing the following steps during each decision-making process:
+
+1. **Selection**: The agent traverses the MCTS tree, selecting the child node that maximizes the UCT value:
+   \[
+   \text{UCT}(s,a) = \frac{W(s,a)}{N(s,a)} + c_p \sqrt{\frac{\ln N(s)}{N(s,a)}}
+   \]
+   where:
+   - \( W(s,a) \): Total reward obtained after taking action \( a \) in state \( s \).
+   - \( N(s,a) \): Number of times action \( a \) has been taken in state \( s \).
+   - \( N(s) \): Total number of times state \( s \) has been visited.
+   - \( c_p \): Exploration parameter.
+
+2. **Expansion**: Once an untried action is reached, the agent expands the tree by adding a new node corresponding to the selected action.
+
+3. **Simulation**: A rollout is performed from the newly expanded node, where the agent simulates future actions using random or heuristic-based policies. The SCM is used to predict the rewards and future states during the rollout.
+
+4. **Backpropagation**: The results from the simulation are backpropagated through the tree, updating the total rewards and visit counts for each node along the way.
+
+5. **Causal Inference**: The agent uses the SCM to simulate the effects of different actions by performing counterfactual analysis on the predicted states.
+
+## Installation
+
+To run the `CausalUCTAgent`, ensure you have the required dependencies installed:
+
+1. Clone this repository:
+   ```bash
+   git clone https://github.com/your-repo/active-vs-causal.git
+   cd active-vs-causal
